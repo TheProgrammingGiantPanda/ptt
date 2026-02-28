@@ -119,9 +119,13 @@ def setup_tray(root):
         icon.stop()
         root.after(0, root.quit)
 
+    def on_restart_audio(icon, item):
+        threading.Thread(target=restart_audio, daemon=True).start()
+
     menu = pystray.Menu(
         pystray.MenuItem("Push-to-Talk  [Right Ctrl]", None, enabled=False),
         pystray.Menu.SEPARATOR,
+        pystray.MenuItem("Restart Audio", on_restart_audio),
         pystray.MenuItem("Exit", on_exit),
     )
 
@@ -310,6 +314,34 @@ def set_highlight(show):
 state_lock = threading.Lock()
 state = "IDLE"
 audio_chunks = []
+stream = None
+
+
+def restart_audio():
+    global stream, state
+    log("[RESTART] Restarting audio stream...")
+    with state_lock:
+        state = "IDLE"
+    set_overlay("hidden")
+    set_highlight(False)
+    update_tray("idle")
+    try:
+        stream.stop()
+        stream.close()
+    except Exception as e:
+        log(f"[RESTART] Error stopping stream: {e}")
+    try:
+        stream = sd.InputStream(
+            samplerate=SAMPLE_RATE,
+            channels=1,
+            dtype='float32',
+            callback=audio_callback,
+            blocksize=1024,
+        )
+        stream.start()
+        log("[RESTART] Audio stream restarted.")
+    except Exception as e:
+        log(f"[RESTART] Error starting stream: {e}")
 
 
 def audio_callback(indata, frames, time_info, status):
@@ -419,7 +451,8 @@ def on_ptt_release(e):
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
-def start_ptt(stream):
+def start_ptt():
+    global stream
     keyboard.on_press_key(PTT_KEY, on_ptt_press, suppress=True)
     keyboard.on_release_key(PTT_KEY, on_ptt_release, suppress=True)
     log(f"PTT ready -- hold [{PTT_KEY.upper()}] to speak, release to transcribe")
@@ -429,7 +462,7 @@ def start_ptt(stream):
 
 
 def main():
-    global overlay
+    global overlay, stream
 
     stream = sd.InputStream(
         samplerate=SAMPLE_RATE,
@@ -453,7 +486,7 @@ def main():
     setup_tray(root)
 
     # Start PTT in background after tkinter is ready
-    root.after(200, lambda: start_ptt(stream))
+    root.after(200, start_ptt)
 
     try:
         root.mainloop()
