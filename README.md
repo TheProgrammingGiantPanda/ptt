@@ -1,6 +1,6 @@
 # PTT — Push-to-Talk for Windows
 
-Hold **Right Ctrl** to record your voice, release to transcribe and type the result into whatever window has focus. Works across multiple applications simultaneously — whichever window you were in gets the text.
+Hold **AltGr** to record your voice, release to transcribe and type the result into whatever window has focus. Works across multiple applications simultaneously — whichever window you were in gets the text.
 
 ## Features
 
@@ -59,7 +59,7 @@ Edit the constants at the top of `ptt.py`:
 | Variable | Default | Description |
 |---|---|---|
 | `WHISPER_URL` | `http://localhost:2022/v1/audio/transcriptions` | Whisper server endpoint |
-| `PTT_KEY` | `right ctrl` | Key to hold for recording |
+| `PTT_KEY` | `alt gr` | Key to hold for recording |
 | `SAMPLE_RATE` | `16000` | Audio sample rate (Hz) |
 
 ## Log

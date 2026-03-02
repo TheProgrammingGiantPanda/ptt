@@ -21,8 +21,20 @@ import pystray
 from PIL import Image, ImageDraw
 
 WHISPER_URL = "http://localhost:2022/v1/audio/transcriptions"
-PTT_KEY = "right ctrl"
+PTT_KEY = "menu"
 SAMPLE_RATE = 16000
+MIC_HINT = "Sonos Ace"   # substring match — set to None to use system default
+
+
+def find_input_device(hint):
+    """Return device index matching hint, or None to use system default."""
+    if not hint:
+        return None
+    for i, d in enumerate(sd.query_devices()):
+        if hint.lower() in d["name"].lower() and d["max_input_channels"] > 0:
+            return i
+    log(f"[WARN] Mic '{hint}' not found, using system default.")
+    return None
 
 # Windows constants for preventing focus steal
 GWL_EXSTYLE      = -20
@@ -123,7 +135,7 @@ def setup_tray(root):
         threading.Thread(target=restart_audio, daemon=True).start()
 
     menu = pystray.Menu(
-        pystray.MenuItem("Push-to-Talk  [Right Ctrl]", None, enabled=False),
+        pystray.MenuItem("Push-to-Talk  [Menu]", None, enabled=False),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem("Restart Audio", on_restart_audio),
         pystray.MenuItem("Exit", on_exit),
@@ -317,21 +329,15 @@ audio_chunks = []
 stream = None
 
 
-def restart_audio():
-    global stream, state
-    log("[RESTART] Restarting audio stream...")
-    with state_lock:
-        state = "IDLE"
-    set_overlay("hidden")
-    set_highlight(False)
-    update_tray("idle")
-    try:
-        stream.stop()
-        stream.close()
-    except Exception as e:
-        log(f"[RESTART] Error stopping stream: {e}")
+def open_stream():
+    """Open the mic stream on demand. Avoids keeping it open when idle,
+    which prevents Bluetooth headsets from switching to headset profile."""
+    global stream
+    if stream is not None:
+        return
     try:
         stream = sd.InputStream(
+            device=find_input_device(MIC_HINT),
             samplerate=SAMPLE_RATE,
             channels=1,
             dtype='float32',
@@ -339,9 +345,37 @@ def restart_audio():
             blocksize=1024,
         )
         stream.start()
-        log("[RESTART] Audio stream restarted.")
+        log("[STREAM] Audio stream opened.")
     except Exception as e:
-        log(f"[RESTART] Error starting stream: {e}")
+        log(f"[STREAM] Error opening stream: {e}")
+        stream = None
+
+
+def close_stream():
+    """Close the mic stream to release the audio device."""
+    global stream
+    if stream is None:
+        return
+    try:
+        stream.stop()
+        stream.close()
+        log("[STREAM] Audio stream closed.")
+    except Exception as e:
+        log(f"[STREAM] Error closing stream: {e}")
+    finally:
+        stream = None
+
+
+def restart_audio():
+    global state
+    log("[RESTART] Restarting audio stream...")
+    with state_lock:
+        state = "IDLE"
+    set_overlay("hidden")
+    set_highlight(False)
+    update_tray("idle")
+    close_stream()
+    log("[RESTART] Audio stream closed (will reopen on next PTT press).")
 
 
 def audio_callback(indata, frames, time_info, status):
@@ -384,6 +418,9 @@ def do_transcribe_and_type(chunks):
         update_tray("processing")
         log("[...] Transcribing...")
         wav_buf = save_wav(chunks, SAMPLE_RATE)
+        audio = np.concatenate(chunks, axis=0)
+        rms = float(np.sqrt(np.mean(audio**2)))
+        log(f"[RMS] {rms:.6f}")
         text = transcribe(wav_buf)
         if text:
             text = " ".join(text.split())
@@ -397,6 +434,7 @@ def do_transcribe_and_type(chunks):
     except Exception as e:
         log(f"Error in transcription thread: {e}")
     finally:
+        close_stream()
         with state_lock:
             state = "IDLE"
         set_overlay("hidden")
@@ -409,17 +447,18 @@ def on_ptt_press(e):
     if e.name != PTT_KEY:
         return
     global state, audio_chunks, target_window, target_hwnd
+    # Check target window before touching state — avoids cycling on key repeat
+    hwnd, title, rect = get_focused_window_info()
+    if hwnd is None:
+        return  # PTT window has focus, silently ignore
     with state_lock:
         if state != "IDLE":
             return
         state = "RECORDING"
         audio_chunks = []
-    target_hwnd, target_window, rect = get_focused_window_info()
-    if target_hwnd is None:
-        log("[WARN] PTT own window has focus — ignoring press.")
-        with state_lock:
-            state = "IDLE"
-        return
+        target_hwnd = hwnd
+        target_window = title
+    open_stream()
     log(f"[REC] Recording... target: {target_window}")
     set_overlay("recording")
     set_highlight(True)
@@ -452,25 +491,18 @@ def on_ptt_release(e):
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def start_ptt():
-    global stream
     keyboard.on_press_key(PTT_KEY, on_ptt_press, suppress=True)
     keyboard.on_release_key(PTT_KEY, on_ptt_release, suppress=True)
+    dev_idx = find_input_device(MIC_HINT)
+    dev_name = sd.query_devices(dev_idx)["name"] if dev_idx is not None else "system default"
     log(f"PTT ready -- hold [{PTT_KEY.upper()}] to speak, release to transcribe")
     log(f"   Whisper: {WHISPER_URL}")
+    log(f"   Mic: {dev_name}")
     log("Hooks registered.")
-    stream.start()
 
 
 def main():
-    global overlay, stream
-
-    stream = sd.InputStream(
-        samplerate=SAMPLE_RATE,
-        channels=1,
-        dtype='float32',
-        callback=audio_callback,
-        blocksize=1024,
-    )
+    global overlay
 
     root = tk.Tk()
     root.withdraw()  # hide the root window, we only use Toplevels
@@ -491,8 +523,7 @@ def main():
     try:
         root.mainloop()
     finally:
-        stream.stop()
-        stream.close()
+        close_stream()
 
 
 if __name__ == "__main__":
